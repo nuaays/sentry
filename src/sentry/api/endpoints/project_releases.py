@@ -104,8 +104,8 @@ class ProjectReleasesEndpoint(ProjectEndpoint):
     @attach_scenarios([create_new_release_scenario])
     def post(self, request, project):
         """
-        Create a New Release
-        ````````````````````
+        Create a New Release for a Project
+        ``````````````````````````````````
 
         Create a new release for the given project.  Releases are used by
         Sentry to improve its error reporting abilities by correlating
