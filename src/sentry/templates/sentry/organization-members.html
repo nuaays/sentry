@@ -82,7 +82,7 @@
       </thead>
       <tbody>
         {% for member, needs_sso, has_2fa in member_list %}
-          <tr {% if member.role == highlight_role %}class="member-role-highlight"{% endif %}>
+          <tr {% if member.role == request.GET.role %}class="member-role-highlight"{% endif %}>
             <td class="table-user-info">
               <span class="avatar">
                 {% letter_avatar_svg member.get_display_name member.get_label %}
