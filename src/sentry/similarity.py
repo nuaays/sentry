@@ -1,6 +1,8 @@
 from __future__ import absolute_import
 
+import functools
 import itertools
+import math
 import random
 from collections import Counter
 from sentry.utils import redis
@@ -31,6 +33,20 @@ def format_bucket(bucket):
 class Feature(object):
     def record(self, label, scope, key, value):
         raise NotImplementedError
+
+
+def scale_to_total(value):
+    total = float(sum(value.values()))
+    return {k: (v / total) for k, v in value.items()}
+
+
+def get_distance(target, other):
+    return math.sqrt(
+        sum(
+            (target.get(k, 0) - other.get(k, 0)) ** 2
+            for k in set(target) | set(other)
+        )
+    )
 
 
 class MinHashFeature(Feature):
@@ -83,11 +99,11 @@ class MinHashFeature(Feature):
         with self.cluster.map() as client:
             responses = fetch_data(client, key)
 
-        bands = [dict(r.value) for r in responses]
+        values = [dict(r.value) for r in responses]
 
         responses = []
         with self.cluster.map() as client:
-            for band, buckets in enumerate(bands):
+            for band, buckets in enumerate(values):
                 responses.append([
                     client.smembers(
                         '{}:{}:{}:0:{}:{}'.format(
@@ -111,12 +127,42 @@ class MinHashFeature(Feature):
             )
 
         n = float(len(self.permutations))
-        return itertools.imap(
+        candidates = map(
             lambda (item, count): (
                 item,
                 (count * self.band_size) / n,
             ),
             candidates.most_common(),
+        )
+
+        with self.cluster.map() as client:
+            data = map(
+                functools.partial(fetch_data, client),
+                [item for item, count in candidates],
+            )
+
+        values = map(scale_to_total, values)
+
+        results = []
+
+        for (key, similarity), promises in zip(candidates, data):
+            results.append((
+                key,
+                sum([
+                    get_distance(
+                        value,
+                        scale_to_total(
+                            dict(promise.value)
+                        ),
+                    ) / 2.0
+                    for value, promise in
+                    zip(values, promises)
+                ]) / float(len(self.permutations) / self.band_size),
+            ))
+
+        return sorted(
+            results,
+            key=lambda (k, v): v,
         )
 
     def record(self, label, scope, key, value):
