@@ -1,7 +1,7 @@
 import React from 'react';
 import LoadingIndicator from '../../components/loadingIndicator';
 import LoadingError from '../../components/loadingError';
-
+import moment from 'moment';
 import ApiMixin from '../../mixins/apiMixin';
 
 const ReleaseCommits = React.createClass({
@@ -64,7 +64,7 @@ const ReleaseCommits = React.createClass({
               <div className="release release-artifact row" key={commit.id}>
                 <div className="col-sm-2 col-xs-2"><strong>{shortId}</strong></div>
                 <div className="col-sm-5 col-xs-5">{commit.message.split('\n')[0]}</div>
-                <div className="col-sm-3 col-xs-3 align-right actions">{commit.dateCreated}</div>
+                <div className="col-sm-3 col-xs-3 align-right actions">{moment(commit.dateCreated).fromNow()}</div>
                 <div className="col-sm-2 col-xs-2 align-right actions">{commit.author.name}</div>
               </div>
             );
