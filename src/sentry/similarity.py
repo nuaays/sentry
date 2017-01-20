@@ -4,7 +4,7 @@ import functools
 import itertools
 import math
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from sentry.utils import redis
 from sentry.utils.iterators import chunked
 
@@ -67,13 +67,17 @@ class MinHashFeature(Feature):
         self.permutations = [shuffle(range(rows)) for _ in xrange(permutations)]
         self.band_size = permutations / bands
 
-    def get_signature_for_value(self, value):
-        # TODO: This needs to return an iterator of signatures, not just a single one.
-        columns = set(hash(token) % self.rows for token in self.tokenizer(value))
-        return map(
-            lambda p: next(i for i, a in enumerate(p) if a in columns),
-            self.permutations
-        )
+    def get_signatures_for_value(self, value):
+        for stream in self.tokenizer(value):
+            columns = set(hash(token) % self.rows for token in stream)
+            try:
+                yield map(
+                    lambda p: next(i for i, a in enumerate(p) if a in columns),
+                    self.permutations
+                )
+            except StopIteration:
+                # TODO: Log this, or something...?
+                pass
 
     def get_similar(self, label, scope, key):
         bands = range(len(self.permutations) / self.band_size)
@@ -148,7 +152,7 @@ class MinHashFeature(Feature):
         for (key, similarity), promises in zip(candidates, data):
             results.append((
                 key,
-                sum([
+                1 - sum([
                     get_distance(
                         value,
                         scale_to_total(
@@ -166,31 +170,31 @@ class MinHashFeature(Feature):
         )
 
     def record(self, label, scope, key, value):
-        signature = self.get_signature_for_value(value)
         with self.cluster.map() as client:
-            for band, bucket in enumerate(map(tuple, chunked(signature, self.band_size))):
-                client.sadd(
-                    '{}:{}:{}:0:{}:{}'.format(
-                        self.namespace,
-                        label,
-                        scope,
-                        band,
-                        format_bucket(bucket),
-                    ),
-                    key,
-                )
+            for signature in self.get_signatures_for_value(value):
+                for band, bucket in enumerate(map(tuple, chunked(signature, self.band_size))):
+                    client.sadd(
+                        '{}:{}:{}:0:{}:{}'.format(
+                            self.namespace,
+                            label,
+                            scope,
+                            band,
+                            format_bucket(bucket),
+                        ),
+                        key,
+                    )
 
-                client.zincrby(
-                    '{}:{}:{}:1:{}:{}'.format(
-                        self.namespace,
-                        label,
-                        scope,
-                        band,
-                        key
-                    ),
-                    format_bucket(bucket),
-                    1,
-                )
+                    client.zincrby(
+                        '{}:{}:{}:1:{}:{}'.format(
+                            self.namespace,
+                            label,
+                            scope,
+                            band,
+                            key
+                        ),
+                        format_bucket(bucket),
+                        1,
+                    )
 
 
 class FeatureManager(object):
@@ -198,14 +202,71 @@ class FeatureManager(object):
         self.features = features
 
     def record(self, scope, key, value):
-        for label, feature in self.features.items():
+        for label, (weight, feature) in self.features.items():
             feature.record(label, scope, key, value)
+
+    def get_similar(self, scope, key):
+        results = defaultdict(dict)
+        for label, (weight, feature) in self.features.items():
+            for k, distance in feature.get_similar(label, scope, key):
+                results[k][label] = distance
+
+        def score(value):
+            return sum(value.get(label, 0) * weight for label, (weight, feature) in self.features.items())
+
+        return sorted(
+            [(id, score(features), features) for id, features in results.items()],
+            key=lambda (id, score, features): score,
+            reverse=True,
+        )
+
+
+def get_exceptions(event):
+    return event.data.get(
+        'sentry.interfaces.Exception',
+        {'values': []}
+    )['values']
+
+
+def get_exception_message(exception):
+    return exception['value'].split()  # XXX: This is obviously super naive.
+
+
+def get_frames(exception):
+    stacktrace = exception.get('stacktrace')
+    if not stacktrace:
+        return []
+    return stacktrace['frames'] or []
+
+
+def tokenize_frame(frame):
+    return '{}.{}'.format(
+        frame.get('module', '?'),
+        frame.get('function', '?'),
+    )
 
 
 features = FeatureManager({
-    'message': MinHashFeature(
+    'message': (0.3, MinHashFeature(
         redis.clusters.get('default'),
-        lambda event: to_shingles(9, event.message),  # TODO: This isn't actually what we'd want here.
+        lambda event: map(
+            lambda exception: to_shingles(
+                5,
+                get_exception_message(exception),
+            ),
+            get_exceptions(event),
+        ),
         0xFFFF, 16, 8,
-    ),
+    )),
+    'frames': (0.7, MinHashFeature(
+        redis.clusters.get('default'),
+        lambda event: map(
+            lambda exception: map(
+                tokenize_frame,
+                get_frames(exception),
+            ),
+            get_exceptions(event),
+        ),
+        0xFFFF, 16, 8,
+    )),
 })
